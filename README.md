@@ -2,51 +2,65 @@
 
 北航校园网登录网址gw.buaa.edu.cn采用了SRun深澜认证计费系统，本项目buaa_gateway_login.py提供了最小化登录脚本，直接运行即可在控制台模拟Web端的登录。
 
-# 配置自动登录脚本
+# 配置凭据
 
-以下步骤展示在Linux中通过systemd配置断网检测和自动登录服务。
-
-首先，将登录信息写入buaa_gateway_login.py中，并将其保存到`/usr/local/bin/buaa_gateway_login.py`。
-
-```python
-...
-if __name__ == "__main__":
-
-    username = 'by1234567'
-    password = 'password'
-...
-```
-
-第二步，编写断网检测代码`/usr/local/bin/buaa_gateway_login.sh`如下。这个脚本使用百度来检测网络连接，在断网时尝试登录，网络正常时什么也不做。
+登录凭据通过环境变量传入，也可以在交互模式下手动输入：
 
 ```bash
-#!/usr/bin/env bash
-# 如果校园网未登录，访问百度将会跳转到gw.buaa.edu.cn
-if curl -s baidu.com 2>/dev/null | grep gw.buaa.edu.cn >/dev/null 2>&1; then
-    python3 /usr/local/bin/buaa_gateway_login.py
-fi
+export BUAA_USERNAME="by1234567"
+export BUAA_PASSWORD="your_password"
+python3 buaa_gateway_login.py
 ```
 
-第三步，给以上重连脚本增加可执行权限，并包装成systemd服务：编辑`/etc/systemd/system/buaa_gateway_login.service`如下
+如果不设置环境变量，脚本会提示手动输入用户名和密码。
 
-```conf
+# 自动重连
+
+项目提供了 `auto_reconnect.sh`（Linux）和 `auto_reconnect.ps1`（Windows）两个自动重连脚本。  
+脚本通过访问百度检测网络连接——若被重定向到 `gw.buaa.edu.cn`，说明需要登录，脚本会自动调用登录程序。
+
+## Linux
+
+### 手动运行
+
+```bash
+# 单次检测
+./auto_reconnect.sh
+
+# 循环模式，默认每 600 秒检测一次
+./auto_reconnect.sh --loop
+
+# 自定义间隔（秒）
+./auto_reconnect.sh --loop 300
+```
+
+### 通过 systemd 配置定时任务
+
+1. 将项目文件复制到 `/usr/local/bin/`：
+
+```bash
+sudo cp buaa_gateway_login.py auto_reconnect.sh /usr/local/bin/
+sudo chmod +x /usr/local/bin/auto_reconnect.sh
+```
+
+2. 创建 systemd 服务 `/etc/systemd/system/buaa_gateway_login.service`：
+
+```ini
 [Unit]
-Description=Automatically relogin when gateway logged out.
+Description=BUAA gateway auto-reconnect
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/buaa_gateway_login.sh
-User=nobody
-Group=systemd-journal
+ExecStart=/usr/local/bin/auto_reconnect.sh
+Environment="BUAA_USERNAME=by1234567"
+Environment="BUAA_PASSWORD=your_password"
 ```
 
-此时即可通过`systemctl start buaa_gateway_login.service`来进行一次自动登录。
+3. 创建定时器 `/etc/systemd/system/buaa_gateway_login.timer`（每 10 分钟执行一次）：
 
-第四步，为上述服务设置定时器`/etc/systemd/system/buaa_gateway_login.timer`，下面的OnCalendar设置为每隔10分钟执行一次。
-
-```conf
+```ini
 [Unit]
-Description=Automatically relogin when gateway logged out.
+Description=BUAA gateway auto-reconnect timer
 
 [Timer]
 OnCalendar=*-*-* *:0/10:0
@@ -56,12 +70,52 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-最后只需要启动计时器即可
+4. 启动定时器：
 
 ```bash
-sudo systemctl enable buaa_gateway_login.timer  # 开机自动启动
-sudo systemctl start buaa_gateway_login.timer   # 立即开始
+sudo systemctl enable --now buaa_gateway_login.timer
 ```
 
-为了保证安全，以上文件属主全部设为root。
+为保证安全，以上文件属主建议设为 root。
+
+## Windows
+
+### 手动运行
+
+```powershell
+# 单次检测
+.\auto_reconnect.ps1
+
+# 循环模式，默认每 600 秒检测一次
+.\auto_reconnect.ps1 -Loop
+
+# 自定义间隔（秒）
+.\auto_reconnect.ps1 -Loop -Interval 300
+```
+
+### 通过任务计划程序配置定时任务
+
+1. 设置环境变量（管理员 PowerShell）：
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("BUAA_USERNAME", "by1234567", "User")
+[System.Environment]::SetEnvironmentVariable("BUAA_PASSWORD", "your_password", "User")
+```
+
+2. 创建计划任务（每 10 分钟执行一次）：
+
+```powershell
+$action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-ExecutionPolicy Bypass -File C:\path\to\auto_reconnect.ps1 *>> C:\path\to\auto_reconnect.log"
+
+$trigger = New-ScheduledTaskTrigger `
+    -RepetitionInterval (New-TimeSpan -Minutes 10) `
+    -Once -At (Get-Date)
+
+Register-ScheduledTask `
+    -TaskName "BUAA Gateway Auto-Reconnect" `
+    -Action $action -Trigger $trigger `
+    -Description "Automatically re-login BUAA campus network gateway"
+```
 
