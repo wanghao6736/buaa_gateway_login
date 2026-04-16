@@ -1,6 +1,6 @@
 # 北航校园网登录脚本
 
-北航校园网登录网址gw.buaa.edu.cn采用了SRun深澜认证计费系统，本项目buaa_gateway_login.py提供了最小化登录脚本，直接运行即可在控制台模拟Web端的登录。
+北航校园网登录网址 `gw.buaa.edu.cn` 采用了 `SRun` 深澜认证计费系统，本项目 `buaa_gateway_login.py` 提供了最小化登录脚本，直接运行即可在控制台模拟 Web 端的登录。
 
 # 配置凭据
 
@@ -9,10 +9,13 @@
 ```bash
 export BUAA_USERNAME="by1234567"
 export BUAA_PASSWORD="your_password"
+
+# Prerequisite: install requests library
+python3 -m pip install requests
+
+# Run
 python3 buaa_gateway_login.py
 ```
-
-如果不设置环境变量，脚本会提示手动输入用户名和密码。
 
 # 自动重连
 
@@ -83,39 +86,38 @@ sudo systemctl enable --now buaa_gateway_login.timer
 ### 手动运行
 
 ```powershell
-# 单次检测
-.\auto_reconnect.ps1
-
-# 循环模式，默认每 600 秒检测一次
-.\auto_reconnect.ps1 -Loop
-
-# 自定义间隔（秒）
-.\auto_reconnect.ps1 -Loop -Interval 300
+# 单次检测（需要指定Python路径）
+.\auto_reconnect.ps1 -PythonExe "path\to\python.exe"
 ```
 
-### 通过任务计划程序配置定时任务
+### 配置定时任务
 
-1. 设置环境变量（管理员 PowerShell）：
+**推荐方式：使用SYSTEM账户（完全不显示窗口）**
+
+1. **设置系统级环境变量**（存储登录凭据）：
 
 ```powershell
-[System.Environment]::SetEnvironmentVariable("BUAA_USERNAME", "by1234567", "User")
-[System.Environment]::SetEnvironmentVariable("BUAA_PASSWORD", "your_password", "User")
+# 使用Machine级别（SYSTEM账户可访问）
+[System.Environment]::SetEnvironmentVariable("BUAA_USERNAME", "by1234567", "Machine")
+[System.Environment]::SetEnvironmentVariable("BUAA_PASSWORD", "your_password", "Machine")
 ```
 
-2. 创建计划任务（每 10 分钟执行一次）：
+2. **创建定时任务**（每 5 分钟检测一次）：
 
 ```powershell
-$action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-ExecutionPolicy Bypass -File C:\path\to\auto_reconnect.ps1 *>> C:\path\to\auto_reconnect.log"
+# 删除旧任务（如果存在）
+Unregister-ScheduledTask -TaskName "BUAA Gateway Auto-Reconnect" -Confirm:$false -ErrorAction SilentlyContinue
 
-$trigger = New-ScheduledTaskTrigger `
-    -RepetitionInterval (New-TimeSpan -Minutes 10) `
-    -Once -At (Get-Date)
-
-Register-ScheduledTask `
-    -TaskName "BUAA Gateway Auto-Reconnect" `
-    -Action $action -Trigger $trigger `
-    -Description "Automatically re-login BUAA campus network gateway"
+# 创建后台任务（使用SYSTEM账户）
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"path\to\auto_reconnect.ps1`" -PythonExe `"path\to\python.exe`""
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+$settings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "BUAA Gateway Auto-Reconnect" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Automatically re-login BUAA campus network gateway" -Force
 ```
 
+**说明：**
+- 使用SYSTEM账户运行，任务在后台 Session 0 执行，**完全不显示窗口**
+- 环境变量必须设置为 Machine 级别（ SYSTEM 账户无法访问 User 级别变量）
+- 请将命令中的路径修改为你实际的 Python 安装路径和脚本存放路径
+- 需要**管理员权限**执行以上命令

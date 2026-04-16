@@ -252,8 +252,8 @@ if __name__ == "__main__":
     import sys
 
     print("gw.buaa.edu.cn portal login...")
-    uname = os.environ.get("BUAA_USERNAME") or input("username: ")
-    pwd = os.environ.get("BUAA_PASSWORD") or getpass.getpass("password: ")
+    uname = os.environ.get("BUAA_USERNAME")
+    pwd = os.environ.get("BUAA_PASSWORD")
 
     result = login(uname, pwd)
     print(json.dumps(result, indent=4, ensure_ascii=False))

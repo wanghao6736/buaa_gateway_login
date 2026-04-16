@@ -1,92 +1,171 @@
-<#
-.SYNOPSIS
-    BUAA Gateway auto-reconnect script for Windows.
-
-.DESCRIPTION
-    Detects whether the campus network gateway login is needed by checking
-    if HTTP requests are redirected to gw.buaa.edu.cn, then calls the
-    Python login script when necessary.
-
-.PARAMETER Loop
-    Run continuously instead of one-shot.
-
-.PARAMETER Interval
-    Seconds between checks in loop mode (default: 600).
-
-.EXAMPLE
-    # One-shot check
-    .\auto_reconnect.ps1
-
-    # Loop mode with 5-minute interval
-    .\auto_reconnect.ps1 -Loop -Interval 300
-
-.NOTES
-    Credentials are read from environment variables:
-      $env:BUAA_USERNAME = "by1234567"
-      $env:BUAA_PASSWORD = "your_password"
-    If not set, the Python script will prompt interactively.
-#>
-
 param(
-    [switch]$Loop,
-    [int]$Interval = 600
+    [string]$PythonExe
 )
 
-$ErrorActionPreference = "Continue"
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+    Write-Error "PythonExe parameter is required. Usage: .\auto_reconnect.ps1 -PythonExe 'path\to\python.exe'"
+    exit 10
+}
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonScript = Join-Path $ScriptDir "buaa_gateway_login.py"
+$LogFile = Join-Path $ScriptDir "auto_reconnect_task.log"
+$LockFile = Join-Path $ScriptDir ".auto_reconnect.lock"
 
 function Write-Log {
     param([string]$Message)
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$timestamp] $Message"
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $LogFile -Value "[$ts] $Message" -Encoding UTF8
 }
 
-function Test-NeedsLogin {
-    try {
-        $response = Invoke-WebRequest -Uri "http://baidu.com" `
-            -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 5 `
-            -ErrorAction SilentlyContinue
-        return $response.Content -match "gw\.buaa\.edu\.cn"
+function Acquire-Lock {
+    if (Test-Path $LockFile) {
+        $lockTime = (Get-Item $LockFile).LastWriteTime
+        $elapsed = (Get-Date) - $lockTime
+        if ($elapsed.TotalMinutes -lt 5) {
+            Write-Log "Another instance is running"
+            return $false
+        }
+        Remove-Item $LockFile -Force
     }
-    catch {
+    
+    try {
+        $pid | Out-File -FilePath $LockFile -Encoding UTF8 -Force
         return $true
     }
+    catch {
+        Write-Log "Failed to acquire lock"
+        return $false
+    }
 }
 
-function Invoke-Login {
-    Write-Log "Network disconnected - attempting login..."
+function Release-Lock {
+    if (Test-Path $LockFile) {
+        Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-EnvValue {
+    param([string]$Name)
+    
+    $v = [Environment]::GetEnvironmentVariable($Name, "Process")
+    if ([string]::IsNullOrWhiteSpace($v)) {
+        $v = [Environment]::GetEnvironmentVariable($Name, "User")
+    }
+    if ([string]::IsNullOrWhiteSpace($v)) {
+        $v = [Environment]::GetEnvironmentVariable($Name, "Machine")
+    }
+    return $v
+}
+
+function Needs-Login {
     try {
-        python $PythonScript
+        $resp = Invoke-WebRequest -Uri "http://baidu.com" -UseBasicParsing -TimeoutSec 5 -MaximumRedirection 0 -ErrorAction SilentlyContinue
+        if ($resp.Content -match "gw\.buaa\.edu\.cn") {
+            return $true
+        }
+        return $false
+    }
+    catch {
+        $errorMsg = $_.Exception.Message
+        if ($errorMsg -match "gw\.buaa\.edu\.cn") {
+            return $true
+        }
+        return $false
+    }
+}
+
+function Do-Login {
+    Write-Log "Network disconnected - attempting login..."
+    
+    if (-not (Test-Path -LiteralPath $PythonExe)) {
+        Write-Log "Python not found: $PythonExe"
+        return $false
+    }
+    
+    $username = Get-EnvValue "BUAA_USERNAME"
+    $password = Get-EnvValue "BUAA_PASSWORD"
+    
+    if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
+        Write-Log "Missing credentials"
+        return $false
+    }
+    
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $PythonExe
+    $psi.Arguments = "`"$PythonScript`""
+    $psi.WorkingDirectory = $ScriptDir
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.EnvironmentVariables["BUAA_USERNAME"] = $username
+    $psi.EnvironmentVariables["BUAA_PASSWORD"] = $password
+    
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    
+    try {
+        [void]$proc.Start()
+        $proc.StandardInput.Close()
+        
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        
+        $proc.WaitForExit()
+        
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            Add-Content -Path $LogFile -Value $stdout -Encoding UTF8
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            Add-Content -Path $LogFile -Value $stderr -Encoding UTF8
+        }
+        
         Start-Sleep -Seconds 2
-        if (-not (Test-NeedsLogin)) {
-            Write-Log "Login successful."
+        
+        if (-not (Needs-Login)) {
+            Write-Log "Login successful"
             return $true
         }
     }
     catch {
-        Write-Log "Error running login script: $_"
+        Write-Log "Login failed"
     }
-    Write-Log "Login failed, still disconnected."
+    finally {
+        if ($null -ne $proc) {
+            $proc.Dispose()
+        }
+    }
+    
+    Write-Log "Login failed, still disconnected"
     return $false
 }
 
-function Invoke-Check {
-    if (Test-NeedsLogin) {
-        Invoke-Login | Out-Null
+function Run-Once {
+    if (Needs-Login) {
+        Do-Login
     }
     else {
-        Write-Log "Network is connected."
+        Write-Log "Network is connected"
     }
 }
 
-if ($Loop) {
-    Write-Log "Starting auto-reconnect loop (interval: ${Interval}s)..."
-    while ($true) {
-        Invoke-Check
-        Start-Sleep -Seconds $Interval
-    }
+if (-not (Acquire-Lock)) {
+    [System.Environment]::Exit(15)
 }
-else {
-    Invoke-Check
+
+try {
+    Write-Log "Task started"
+    Run-Once
+}
+catch {
+    Write-Log "Fatal error: $($_.Exception.Message)"
+}
+finally {
+    Write-Log "Task finished"
+    Release-Lock
 }
